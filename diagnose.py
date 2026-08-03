@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """
-JKKねっと ダンプ v5 : ポップアップを捕捉する
+JKKねっと ダンプ v6 : 検索を実行して結果一覧の構造を調べる
 
-判明した仕組み:
-  中継ページの submitNext() は
-    window.open("/search/jkknet/wait.jsp", "JKKnet") で新しいウィンドウを開き、
-    forwardForm の target をそのウィンドウにして POST する。
-  つまり本物の検索画面はポップアップ側に出る。元のページは中継ページのまま。
+v5で判明した仕組み:
+  1. 中継ページで submitNext() を呼ぶとポップアップ(名前 JKKnet)が開く
+  2. ポップアップに条件入力画面が出る (form name=akiSearch)
+  3. 地域は checkbox name="akiyaInitRM.akiyaRefM.checks" value=<区コード>
+     区コードは東京都の行政区画コードと一致（板橋区=19 など）
+  4. 検索実行は submitPage('akiyaJyoukenRef') を呼ぶ
 
-なので expect_popup() でポップアップを捕まえてダンプする。
+このスクリプトでは、プライバシーのため特定の区ではなく
+「区部すべて」(allCheck=ALLKU) で検索し、結果一覧の構造だけを調べる。
 """
 
 import os
@@ -17,9 +19,8 @@ import time
 from playwright.sync_api import sync_playwright
 
 PC = "https://jhomes.to-kousya.or.jp/search/jkknet/service/akiyaJyoukenStartInit"
-MOBILE = "https://jhomes.to-kousya.or.jp/search/jkknet/service/akiyaJyoukenInitMobile"
-PC_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-         "(KHTML, like Gecko) Chrome/126.0 Safari/537.36")
+UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+      "(KHTML, like Gecko) Chrome/126.0 Safari/537.36")
 
 out = []
 
@@ -29,128 +30,112 @@ def log(s=""):
     out.append(str(s))
 
 
-def dump(page, label):
-    log(f"\n{'='*45}\n### {label}\n{'='*45}")
-    log(f"URL: {page.url}")
+def open_search_popup(ctx, page):
+    """中継ページからポップアップの条件入力画面を取得する"""
+    page.goto(PC, wait_until="domcontentloaded", timeout=60000)
+    time.sleep(3)
+    with page.expect_popup(timeout=30000) as pi:
+        page.evaluate("submitNext()")
+    popup = pi.value
+    for _ in range(20):
+        time.sleep(2)
+        if "wait.jsp" not in popup.url:
+            break
     try:
-        log(f"title: {page.title()}")
+        popup.wait_for_load_state("networkidle", timeout=30000)
     except Exception:
         pass
-
-    for fi, frame in enumerate(page.frames):
-        log(f"\n--- frame[{fi}] name={frame.name or '(none)'} url={frame.url[:90]}")
-        try:
-            forms = frame.locator("form")
-            log(f"  forms: {forms.count()}")
-            for i in range(min(forms.count(), 5)):
-                f = forms.nth(i)
-                log(f"    form[{i}] name={f.get_attribute('name')} "
-                    f"method={f.get_attribute('method')} action={f.get_attribute('action')}")
-        except Exception:
-            pass
-
-        try:
-            inputs = frame.locator("input")
-            n = inputs.count()
-            log(f"  inputs: {n}")
-            for i in range(min(n, 90)):
-                el = inputs.nth(i)
-                log(f"    [{i}] type={el.get_attribute('type')} "
-                    f"name={el.get_attribute('name')} "
-                    f"value={el.get_attribute('value')} "
-                    f"onclick={(el.get_attribute('onclick') or '')[:70]}")
-            if n > 90:
-                log(f"    ...ほか{n-90}件")
-        except Exception:
-            pass
-
-        try:
-            sels = frame.locator("select")
-            log(f"  selects: {sels.count()}")
-            for i in range(min(sels.count(), 15)):
-                s = sels.nth(i)
-                opts = s.locator("option")
-                sample = [f"{opts.nth(j).get_attribute('value')}={opts.nth(j).inner_text()}"
-                          for j in range(min(opts.count(), 30))]
-                log(f"    select[{i}] name={s.get_attribute('name')} n={opts.count()}")
-                log(f"      {sample}")
-        except Exception:
-            pass
-
-        try:
-            links = frame.locator("a")
-            n = links.count()
-            log(f"  links: {n}")
-            for i in range(min(n, 35)):
-                el = links.nth(i)
-                log(f"    a[{i}] {(el.inner_text() or '').strip()[:25]} "
-                    f"href={(el.get_attribute('href') or '')[:60]} "
-                    f"onclick={(el.get_attribute('onclick') or '')[:70]}")
-        except Exception:
-            pass
-
-        try:
-            log(f"  --- body ---\n{frame.locator('body').inner_text()[:2500]}")
-        except Exception:
-            pass
-
-
-def try_entry(p, label, url):
-    log(f"\n\n########## {label} ##########")
-    browser = p.chromium.launch()
-    ctx = browser.new_context(locale="ja-JP", user_agent=PC_UA,
-                              viewport={"width": 1280, "height": 900})
-    page = ctx.new_page()
-    page.on("dialog", lambda d: d.dismiss())
-
-    try:
-        page.goto(url, wait_until="domcontentloaded", timeout=60000)
-        time.sleep(3)
-
-        log("submitNext() を呼んでポップアップを待つ...")
-        try:
-            with page.expect_popup(timeout=30000) as pi:
-                page.evaluate("submitNext()")
-            popup = pi.value
-        except Exception as e:
-            log(f"expect_popup 失敗: {e}")
-            # 既に開いているページを探す
-            pages = [pg for pg in ctx.pages if pg != page]
-            if not pages:
-                log("ポップアップは見つかりませんでした")
-                return
-            popup = pages[-1]
-
-        log(f"ポップアップ取得: {popup.url}")
-
-        # wait.jsp から本物の画面に切り替わるまで待つ
-        for i in range(20):
-            time.sleep(2)
-            if "wait.jsp" not in popup.url:
-                break
-            log(f"  待機中... ({i+1}) {popup.url}")
-
-        try:
-            popup.wait_for_load_state("networkidle", timeout=30000)
-        except Exception:
-            pass
-        time.sleep(2)
-
-        log(f"最終URL: {popup.url}")
-        dump(popup, f"{label} のポップアップ")
-
-    except Exception as e:
-        import traceback
-        log(f"!!! {label} 失敗: {type(e).__name__}: {str(e)[:300]}")
-        log(traceback.format_exc()[:1200])
-    finally:
-        browser.close()
+    time.sleep(2)
+    return popup
 
 
 def main():
     with sync_playwright() as p:
-        try_entry(p, "PC版", PC)
-        try_entry(p, "モバイル版", MOBILE)
+        browser = p.chromium.launch()
+        ctx = browser.new_context(locale="ja-JP", user_agent=UA,
+                                  viewport={"width": 1280, "height": 900})
+        page = ctx.new_page()
+        page.on("dialog", lambda d: d.accept())
+
+        popup = open_search_popup(ctx, page)
+        popup.on("dialog", lambda d: d.accept())
+        log(f"条件入力画面: {popup.url}")
+        log(f"title: {popup.title()}")
+
+        # --- 区部すべてにチェック ---
+        log("\n区部すべてにチェックを入れる")
+        try:
+            popup.locator("input[value=ALLKU]").first.check(timeout=10000)
+            time.sleep(1)
+            checked = popup.evaluate(
+                "document.querySelectorAll("
+                "'input[name=\"akiyaInitRM.akiyaRefM.checks\"]:checked').length"
+            )
+            log(f"チェックされた区の数: {checked}")
+        except Exception as e:
+            log(f"チェック失敗: {e}")
+
+        # --- 検索実行 ---
+        log("\nsubmitPage('akiyaJyoukenRef') を実行")
+        try:
+            popup.evaluate("submitPage('akiyaJyoukenRef')")
+        except Exception as e:
+            log(f"submitPage失敗: {e}")
+        try:
+            popup.wait_for_load_state("networkidle", timeout=60000)
+        except Exception:
+            pass
+        time.sleep(4)
+
+        log(f"\n検索後URL: {popup.url}")
+        log(f"title: {popup.title()}")
+
+        # --- 結果ページの構造 ---
+        log("\n" + "=" * 45)
+        log("### 結果一覧ページの構造")
+        log("=" * 45)
+
+        try:
+            tables = popup.locator("table")
+            log(f"tables: {tables.count()}")
+        except Exception:
+            pass
+
+        try:
+            rows = popup.locator("tr")
+            n = rows.count()
+            log(f"tr の総数: {n}")
+            log("\n--- 各行のテキスト（最大40行）---")
+            for i in range(min(n, 40)):
+                try:
+                    t = rows.nth(i).inner_text(timeout=2000)
+                    t = " | ".join(x.strip() for x in t.split("\n") if x.strip())
+                    log(f"  tr[{i}]: {t[:220]}")
+                except Exception:
+                    pass
+        except Exception as e:
+            log(f"行取得失敗: {e}")
+
+        # --- リンク（詳細ページへの遷移方法）---
+        try:
+            links = popup.locator("a")
+            n = links.count()
+            log(f"\nlinks: {n}")
+            for i in range(min(n, 30)):
+                el = links.nth(i)
+                log(f"  a[{i}] text={(el.inner_text() or '').strip()[:25]} "
+                    f"href={(el.get_attribute('href') or '')[:60]} "
+                    f"onclick={(el.get_attribute('onclick') or '')[:80]}")
+        except Exception:
+            pass
+
+        # --- 本文 ---
+        try:
+            log(f"\n--- body text ---\n{popup.locator('body').inner_text()[:4000]}")
+        except Exception:
+            pass
+
+        browser.close()
 
 
 if __name__ == "__main__":
@@ -167,4 +152,4 @@ if __name__ == "__main__":
         if len(text) > 60000:
             text = text[:60000] + "\n...(切り詰め)"
         with open(path, "a", encoding="utf-8") as f:
-            f.write("# JKKねっと ダンプ v5\n\n```\n" + text + "\n```\n")
+            f.write("# JKKねっと ダンプ v6（結果一覧）\n\n```\n" + text + "\n```\n")
