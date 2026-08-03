@@ -1,1 +1,34 @@
+# ============================================
+# 公開リポジトリ用の設定ファイル
+# ============================================
+# このファイルは全世界から見えます。
+# 実際の監視条件（住みたいエリア・団地名・家賃）はここに書かず、
+# GitHub の Secrets に登録してください。
+#
+#   Settings → Secrets and variables → Actions → New repository secret
+#
+#   NTFY_TOPIC    ntfy のトピック名（必須）
+#   JKK_SALT      state.json のハッシュ用ソルト（適当な長い文字列）
+#   JKK_AREAS     監視する区市町村（カンマ区切り） 例: 世田谷区,目黒区
+#   JKK_KEYWORDS  団地名キーワード（カンマ区切り、空なら全件）
+#   JKK_MAX_RENT  家賃上限（円）
+#   JKK_LAYOUTS   間取り（カンマ区切り、空なら全件） 例: 2DK,2LDK
+#
+# 以下は Secrets が未設定のときに使われるダミー値です。
+# ============================================
+
+areas:
+  - 中央区
+
+property_keywords: []
+
+max_rent: 0
+
+layouts: []
+
+notify:
+  # ここには絶対に本番のトピック名を書かないこと（履歴に永久に残ります）
+  topic: PLACEHOLDER-set-NTFY_TOPIC-in-secrets
+  priority: high
+  server: https://ntfy.sh
 
