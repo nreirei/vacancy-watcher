@@ -2,11 +2,8 @@ name: JKK空室監視
 
 "on":
   schedule:
-    # UTC表記（JST = UTC+9）。12時台は除外
-    - cron: "32-57/5 0 * * *"    # JST 9:32-9:57
-    - cron: "2-57/5 1-2 * * *"   # JST 10:02-11:57
-    - cron: "2-57/5 4-7 * * *"   # JST 13:02-16:57
-    - cron: "2-32/5 8 * * *"     # JST 17:02-17:32
+    - cron: "32-57/5 9 * * *"
+      timezone: "Asia/Tokyo"
 
   workflow_dispatch:
     inputs:
