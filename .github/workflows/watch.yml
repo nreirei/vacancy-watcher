@@ -1,25 +1,7 @@
 name: JKK空室監視
 
-on:
-  schedule:
-    # ─────────────────────────────────────────────────────────────
-    # 注意: GitHub Actions の cron は【UTC】固定です（JST = UTC+9）
-    # 日本には夏時間が無いので、年間を通してこのままで大丈夫です
-    # ─────────────────────────────────────────────────────────────
-
-    # 【重点時間帯 その1】JST 10:00〜13:00 → UTC 01:00〜04:00 / 5分おき
-    - cron: "3-58/5 1-3 * * *"
-
-    # 【重点時間帯 その2】JST 16:00〜18:00 → UTC 07:00〜09:00 / 5分おき
-    - cron: "3-58/5 7-8 * * *"
-
-    # 【保険】それ以外の日中は1時間おき（JST 8,9,13,14,15,18〜22時）
-    - cron: "23 23,0,4-6,9-13 * * *"
-
-    # 【保険】深夜〜早朝は3時間おき（JST 23,2,5時）
-    - cron: "23 14,17,20 * * *"
-
-  workflow_dispatch:        # 手動実行用（スマホからのテストはこちら）
+"on":
+  workflow_dispatch:
     inputs:
       dry_run:
         description: "通知を送らずに結果だけ確認する"
@@ -30,7 +12,6 @@ on:
         type: boolean
         default: true
 
-# state.json をコミットし直すために書き込み権限が必要
 permissions:
   contents: write
 
@@ -42,7 +23,6 @@ jobs:
   watch:
     runs-on: ubuntu-latest
     timeout-minutes: 10
-
     steps:
       - uses: actions/checkout@v4
 
@@ -51,26 +31,26 @@ jobs:
           python-version: "3.12"
           cache: pip
 
-      - name: 依存インストール
+      - name: install
         run: |
           pip install -r requirements.txt
           playwright install --with-deps chromium
 
-      - name: 監視実行
+      - name: run
         env:
-          NTFY_TOPIC:   ${{ secrets.NTFY_TOPIC }}
-          JKK_SALT:     ${{ secrets.JKK_SALT }}
-          JKK_AREAS:    ${{ secrets.JKK_AREAS }}
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          JKK_SALT: ${{ secrets.JKK_SALT }}
+          JKK_AREAS: ${{ secrets.JKK_AREAS }}
           JKK_KEYWORDS: ${{ secrets.JKK_KEYWORDS }}
           JKK_MAX_RENT: ${{ secrets.JKK_MAX_RENT }}
-          JKK_LAYOUTS:  ${{ secrets.JKK_LAYOUTS }}
+          JKK_LAYOUTS: ${{ secrets.JKK_LAYOUTS }}
         run: |
           ARGS=""
           if [ "${{ inputs.dry_run }}" = "true" ]; then ARGS="$ARGS --dry-run"; fi
-          if [ "${{ inputs.debug }}"   = "true" ]; then ARGS="$ARGS --debug";   fi
+          if [ "${{ inputs.debug }}" = "true" ]; then ARGS="$ARGS --debug"; fi
           python jkk_watch.py $ARGS
 
-      - name: デバッグ出力を保存（スクショはここからDL）
+      - name: upload debug
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -79,12 +59,11 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-      - name: state.json を保存
+      - name: save state
         if: inputs.dry_run != true
         run: |
-          git config user.name  "github-actions[bot]"
+          git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add state.json
-          git diff --staged --quiet || git commit -m "chore: update state [skip ci]"
+          git diff --staged --quiet || git commit -m "chore: update state"
           git push
-
