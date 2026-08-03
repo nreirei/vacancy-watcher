@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-JKKねっと 画面構造ダンプ v3
+JKKねっと ダンプ v4 : 通信レベルの調査
 
-判明したこと:
-  - PC版 akiyaJyoukenStartInit は中継ページで自分自身に戻る無限ループ
-  - 公式サイトに akiyaJyoukenInitMobile というモバイル版入口がある
+v3で判明:
+  - PC版もモバイル版も中継ページから進まない
+  - submitNext() を呼んでも変化なし
 
-そこで
-  A: 公式サイトのリンクを実際にクリックして入る（Referer が付く）
-  B: モバイル版へ直接アクセス
-  C: モバイル端末のUAで開く
-の3通りを試し、中継ページを突破できた画面をダンプする。
+そこで HTTP のやり取りそのものを記録する:
+  - 全リクエスト/レスポンスのURL・メソッド・ステータス
+  - コンソールエラー（JSが落ちていないか）
+  - submitNext 関数が本当に存在するか
+  - ビューポートを直して公式サイトのリンクを正しくクリック
 """
 
 import os
@@ -19,6 +19,7 @@ import time
 from playwright.sync_api import sync_playwright
 
 OFFICIAL = "https://www.to-kousya.or.jp/chintai/index.html"
+PC = "https://jhomes.to-kousya.or.jp/search/jkknet/service/akiyaJyoukenStartInit"
 MOBILE = "https://jhomes.to-kousya.or.jp/search/jkknet/service/akiyaJyoukenInitMobile"
 
 PC_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -41,86 +42,89 @@ def interstitial(page):
         return False
 
 
-def dump(page, label):
-    log(f"\n{'='*45}")
-    log(f"### {label}")
-    log(f"{'='*45}")
+def hook(page, tag):
+    def on_req(r):
+        if "to-kousya" in r.url:
+            log(f"  [{tag} REQ ] {r.method} {r.url[:110]}")
+
+    def on_res(r):
+        if "to-kousya" in r.url:
+            log(f"  [{tag} RES ] {r.status} {r.url[:110]}")
+
+    page.on("request", on_req)
+    page.on("response", on_res)
+    page.on("console", lambda m: log(f"  [{tag} CONS] {m.type}: {m.text[:140]}"))
+    page.on("pageerror", lambda e: log(f"  [{tag} ERR ] {str(e)[:200]}"))
+    page.on("requestfailed",
+            lambda r: log(f"  [{tag} FAIL] {r.url[:90]} {r.failure}"))
+
+
+def inspect_js(page, tag):
+    """中継ページのスクリプトの中身と関数の存在を確認"""
+    try:
+        exists = page.evaluate("typeof submitNext")
+        log(f"  [{tag}] typeof submitNext = {exists}")
+    except Exception as e:
+        log(f"  [{tag}] evaluate失敗: {e}")
+    try:
+        scripts = page.evaluate(
+            "Array.from(document.scripts).map(s => s.src || s.textContent).join('\\n---\\n')"
+        )
+        log(f"  [{tag}] --- scripts ---\n{scripts[:2500]}")
+    except Exception as e:
+        log(f"  [{tag}] script取得失敗: {e}")
+
+
+def dump_page(page, label):
+    log(f"\n{'='*45}\n### {label}\n{'='*45}")
     log(f"URL: {page.url}")
     log(f"中継ページか: {interstitial(page)}")
-
     for fi, frame in enumerate(page.frames):
-        log(f"\n--- frame[{fi}] {frame.name or ''} {frame.url[:80]} ---")
+        log(f"--- frame[{fi}] {frame.url[:90]}")
         try:
             forms = frame.locator("form")
             for i in range(min(forms.count(), 4)):
                 f = forms.nth(i)
-                log(f"  form[{i}] name={f.get_attribute('name')} "
-                    f"action={f.get_attribute('action')}")
-        except Exception:
-            pass
-
-        try:
+                log(f"  form[{i}] name={f.get_attribute('name')} action={f.get_attribute('action')}")
             inputs = frame.locator("input")
-            n = inputs.count()
-            log(f"  inputs: {n}")
-            for i in range(min(n, 70)):
+            log(f"  inputs: {inputs.count()}")
+            for i in range(min(inputs.count(), 60)):
                 el = inputs.nth(i)
-                log(f"    [{i}] type={el.get_attribute('type')} "
-                    f"name={el.get_attribute('name')} "
-                    f"value={el.get_attribute('value')} "
-                    f"onclick={(el.get_attribute('onclick') or '')[:70]}")
-        except Exception:
-            pass
-
-        try:
+                log(f"    [{i}] type={el.get_attribute('type')} name={el.get_attribute('name')} "
+                    f"value={el.get_attribute('value')}")
             sels = frame.locator("select")
             log(f"  selects: {sels.count()}")
             for i in range(min(sels.count(), 12)):
                 s = sels.nth(i)
                 opts = s.locator("option")
-                sample = []
-                for j in range(min(opts.count(), 12)):
-                    sample.append(f"{opts.nth(j).get_attribute('value')}={opts.nth(j).inner_text()}")
+                sample = [f"{opts.nth(j).get_attribute('value')}={opts.nth(j).inner_text()}"
+                          for j in range(min(opts.count(), 12))]
                 log(f"    select[{i}] name={s.get_attribute('name')} {sample}")
-        except Exception:
-            pass
-
-        try:
-            links = frame.locator("a")
-            n = links.count()
-            log(f"  links: {n}")
-            for i in range(min(n, 30)):
-                el = links.nth(i)
-                log(f"    a[{i}] {(el.inner_text() or '').strip()[:25]} "
-                    f"href={(el.get_attribute('href') or '')[:70]} "
-                    f"onclick={(el.get_attribute('onclick') or '')[:60]}")
-        except Exception:
-            pass
-
-        try:
-            log(f"  --- body ---\n{frame.locator('body').inner_text()[:1800]}")
-        except Exception:
-            pass
+            log(f"  --- body ---\n{frame.locator('body').inner_text()[:1500]}")
+        except Exception as e:
+            log(f"  dump error: {e}")
 
 
-def attempt(p, label, ua, fn):
+def run(p, label, ua, viewport, action):
     log(f"\n\n########## {label} ##########")
     browser = p.chromium.launch()
-    ctx = browser.new_context(locale="ja-JP", user_agent=ua)
+    ctx = browser.new_context(locale="ja-JP", user_agent=ua, viewport=viewport)
     page = ctx.new_page()
+    hook(page, label[0])
     try:
-        fn(page)
-        time.sleep(4)
+        action(page)
+        time.sleep(6)
+        inspect_js(page, label[0])
         if interstitial(page):
-            log("→ 中継ページのまま。submitNext を試す")
+            log(f"  [{label[0]}] 中継ページ → submitNext を実行")
             try:
-                page.evaluate("typeof submitNext==='function' ? submitNext() : document.forwardForm.submit()")
-                time.sleep(5)
+                page.evaluate("submitNext()")
             except Exception as e:
-                log(f"  submit失敗: {e}")
-        dump(page, label)
+                log(f"  submitNext例外: {e}")
+            time.sleep(6)
+        dump_page(page, label)
     except Exception as e:
-        log(f"!!! {label} 失敗: {type(e).__name__}: {e}")
+        log(f"!!! {label} 失敗: {type(e).__name__}: {str(e)[:400]}")
     finally:
         browser.close()
 
@@ -128,31 +132,28 @@ def attempt(p, label, ua, fn):
 def main():
     with sync_playwright() as p:
 
-        # A: 公式サイトからモバイル版リンクをクリック
         def a(page):
             page.goto(OFFICIAL, wait_until="domcontentloaded", timeout=60000)
             time.sleep(3)
-            link = page.locator("a[href*='akiyaJyoukenInitMobile']").first
-            log(f"リンク件数: {page.locator('a[href*=akiyaJyoukenInitMobile]').count()}")
-            link.click(timeout=15000)
+            # 非表示リンクは href を読んで直接遷移（Referer を付ける）
+            href = page.locator("a[href*='akiyaJyoukenInitMobile']").first.get_attribute("href")
+            log(f"  取得した href: {href}")
+            page.evaluate("u => location.href = u", href)
             page.wait_for_load_state("domcontentloaded", timeout=60000)
 
-        attempt(p, "A: 公式からモバイル版リンクをクリック(PC UA)", PC_UA, a)
+        run(p, "A: 公式→モバイル版(スマホUA/スマホ画面)", SP_UA,
+            {"width": 390, "height": 844}, a)
 
-        # B: モバイル版へ直接アクセス（スマホUA）
         def b(page):
+            page.goto(PC, wait_until="domcontentloaded", timeout=60000)
+
+        run(p, "B: PC版に直接(通信ログ重視)", PC_UA, {"width": 1280, "height": 900}, b)
+
+        def c(page):
             page.goto(MOBILE, wait_until="domcontentloaded", timeout=60000)
 
-        attempt(p, "B: モバイル版へ直接アクセス(スマホ UA)", SP_UA, b)
-
-        # C: 公式サイト経由でPC版（Referer付き）
-        def c(page):
-            page.goto(OFFICIAL, wait_until="domcontentloaded", timeout=60000)
-            time.sleep(3)
-            page.locator("a[href*='akiyaJyoukenStartInit']").first.click(timeout=15000)
-            page.wait_for_load_state("domcontentloaded", timeout=60000)
-
-        attempt(p, "C: 公式からPC版リンクをクリック(PC UA)", PC_UA, c)
+        run(p, "C: モバイル版に直接(通信ログ重視)", SP_UA,
+            {"width": 390, "height": 844}, c)
 
 
 if __name__ == "__main__":
@@ -169,4 +170,4 @@ if __name__ == "__main__":
         if len(text) > 60000:
             text = text[:60000] + "\n...(切り詰め)"
         with open(path, "a", encoding="utf-8") as f:
-            f.write("# JKKねっと ダンプ v3\n\n```\n" + text + "\n```\n")
+            f.write("# JKKねっと ダンプ v4\n\n```\n" + text + "\n```\n")
