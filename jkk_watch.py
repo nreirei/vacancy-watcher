@@ -57,6 +57,8 @@ AREA_CODES = {
     "羽村市": "57", "あきる野市": "56-64",
     # 町村
     "瑞穂町": "62", "日の出町": "63", "檜原村": "65", "奥多摩町": "66",
+    # 一括指定
+    "区部": "ALLKU", "市部": "ALLSI",
 }
 
 
@@ -142,18 +144,131 @@ def select_areas(popup, areas):
             print(f"[warn] 未知の地域名: {area}", file=sys.stderr)
             continue
         try:
-            box = popup.locator(
-                f'input[name="akiyaInitRM.akiyaRefM.checks"][value="{code}"]'
-            )
-            box.first.check(timeout=10000)
+            if code in ("ALLKU", "ALLSI"):
+                sel = f'input[name="akiyaInitRM.akiyaRefM.allCheck"][value="{code}"]'
+            else:
+                sel = f'input[name="akiyaInitRM.akiyaRefM.checks"][value="{code}"]'
+            popup.locator(sel).first.check(timeout=10000)
             ok += 1
         except Exception as e:
             print(f"[warn] {area} のチェック失敗: {e}", file=sys.stderr)
     return ok
 
 
+def is_detail_page(popup):
+    """該当1件のとき、JKKは一覧を飛ばして詳細ページに遷移する"""
+    try:
+        body = popup.locator("body").inner_text()
+    except Exception:
+        return False
+    return ("住戸情報の確認" in body) or ("募集名称" in body and "住宅名" in body)
+
+
+def parse_detail(popup):
+    """詳細ページ（該当1件のとき）から部屋情報を取り出す。
+
+    レイアウト:
+      住宅名   コーシャハイム光が丘第一
+      ...
+      部屋番号 申込世帯 住戸型式 間取り 向き 家賃 敷金 共益費 住所 入居可能日
+      2-214    1～      Ｌ       ２ＬＤＫ 西   100,100 ...  練馬区光が丘３－３－２
+    """
+    rooms = []
+
+    # 住宅名を拾う
+    name = ""
+    try:
+        name = popup.evaluate(r"""
+        () => {
+          const tds = Array.from(document.querySelectorAll('td,th'));
+          for (let i = 0; i < tds.length; i++) {
+            if (tds[i].innerText.replace(/\s/g,'') === '住宅名' && tds[i+1]) {
+              return tds[i+1].innerText.replace(/\s+/g,'');
+            }
+          }
+          return '';
+        }
+        """)
+    except Exception:
+        pass
+
+    area = ""
+    rows = popup.locator("tr")
+    for i in range(rows.count()):
+        row = rows.nth(i)
+        try:
+            if row.locator("table").count() > 0:
+                continue
+            cells = row.locator("xpath=./td")
+            vals = [re.sub(r"\s+", "", cells.nth(j).inner_text(timeout=2000))
+                    for j in range(cells.count())]
+        except Exception:
+            continue
+
+        if len(vals) < 6:
+            continue
+
+        # 家賃らしきセルを探す
+        rent = None
+        rent_text = ""
+        rent_idx = None
+        for j, v in enumerate(vals):
+            if re.fullmatch(r"[\d,]{5,}(～[\d,]{5,})?", v):
+                r = parse_rent(v)
+                if r and r >= 20000:
+                    rent, rent_text, rent_idx = r, v, j
+                    break
+        if rent is None:
+            continue
+
+        # 間取り
+        layout = ""
+        for v in vals:
+            if re.fullmatch(r"[０-９\d][ＳＬＤＫRＲ]{1,4}", v) or re.search(r"[ＬＤＫ]{2,}", v):
+                layout = v
+                break
+
+        # 部屋番号（先頭付近の数字ハイフン形式）
+        room = ""
+        for v in vals[:3]:
+            if re.fullmatch(r"[\dA-Za-z]+-[\dA-Za-z]+", v):
+                room = v
+                break
+
+        # 住所から地域を拾う
+        for v in vals:
+            m = re.match(r"(.{1,6}[区市町村])", v)
+            if m and len(v) > 4:
+                area = m.group(1)
+                break
+
+        # 床面積
+        menseki = ""
+        for v in vals:
+            if re.fullmatch(r"\d{2,3}\.\d{1,2}", v):
+                menseki = v
+                break
+
+        rooms.append({
+            "id": f"{name}|{layout}|{rent_text}|{room}",
+            "name": name or "(不明)",
+            "area": area,
+            "yusen": "",
+            "type": "",
+            "layout": layout,
+            "menseki": menseki,
+            "rent": rent,
+            "rent_text": rent_text,
+            "kyoueki": "",
+            "count": "1",
+            "raw": " ".join(vals)[:200],
+        })
+
+    return rooms
+
+
 def parse_results(popup):
-    """結果一覧の表から部屋情報を取り出す。
+    """一覧ページの表から部屋情報を取り出す（現在のページのみ）。
 
     データ行は 住宅名/地域/優先種別/住宅種別/間取り/床面積/家賃/共益費/募集戸数 の9列。
     入れ子テーブルの外枠 tr を除外するため、table を含む tr は無視する。
@@ -164,7 +279,6 @@ def parse_results(popup):
     for i in range(rows.count()):
         row = rows.nth(i)
         try:
-            # 入れ子の外枠行は飛ばす
             if row.locator("table").count() > 0:
                 continue
             cells = row.locator("xpath=./td")
@@ -178,7 +292,6 @@ def parse_results(popup):
         if len(vals) < 8:
             continue
 
-        # 「◯◯区」「◯◯市」のセルを見つけて基準にする
         idx = None
         for j, v in enumerate(vals):
             if re.fullmatch(r".{1,6}[区市町村]", v):
@@ -199,25 +312,12 @@ def parse_results(popup):
         yusen, jtype, madori, menseki, yachin, kyoueki = rest[:6]
         kosu = rest[6] if len(rest) > 6 else ""
 
-        # 家賃が数値でない行はヘッダなど
         rent = parse_rent(yachin)
         if rent is None:
             continue
 
-        # 住宅コード（senPage の第2引数）を取れれば ID に使う
-        code = ""
-        try:
-            for k in range(row.locator("a").count()):
-                oc = row.locator("a").nth(k).get_attribute("onclick") or ""
-                m = re.search(r"senPage\('[^']*','([^']+)','([^']+)','([^']*)'", oc)
-                if m:
-                    code = f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
-                    break
-        except Exception:
-            pass
-
         rooms.append({
-            "id": code or f"{name}|{madori}|{menseki}|{yachin}|{yusen}",
+            "id": f"{name}|{madori}|{yachin}|{yusen}",
             "name": name,
             "area": area,
             "yusen": yusen,
@@ -232,6 +332,47 @@ def parse_results(popup):
         })
 
     return rooms
+
+
+def parse_all_pages(popup, max_pages=15):
+    """一覧を最終ページまでたどって集約する。
+
+    1ページ10件表示なので、10件を超えるとページ送りが必要。
+    ページ送りは movePagingInputGridPage('afterPage') を呼ぶ。
+    """
+    seen_ids = set()
+    all_rooms = []
+
+    for page_no in range(1, max_pages + 1):
+        rooms = parse_results(popup)
+        new = 0
+        for r in rooms:
+            if r["id"] not in seen_ids:
+                seen_ids.add(r["id"])
+                all_rooms.append(r)
+                new += 1
+        print(f"[info] {page_no}ページ目: {len(rooms)}件（うち新規{new}件）")
+
+        # 新規が1件も無ければ、同じページを見ているとみなして打ち切る
+        if page_no > 1 and new == 0:
+            break
+
+        # 次ページへ
+        try:
+            before = popup.locator("body").inner_text()[:400]
+            popup.evaluate("movePagingInputGridPage('afterPage')")
+            try:
+                popup.wait_for_load_state("networkidle", timeout=30000)
+            except Exception:
+                pass
+            time.sleep(2)
+            after = popup.locator("body").inner_text()[:400]
+            if before == after:
+                break
+        except Exception:
+            break
+
+    return all_rooms
 
 
 def parse_rent(text):
@@ -280,12 +421,21 @@ def fetch_listings(areas, debug=False):
             popup.screenshot(path=str(DEBUG_DIR / "results.png"), full_page=True)
             (DEBUG_DIR / "results.html").write_text(popup.content(), encoding="utf-8")
 
-        if "該当" in body and re.search(r"0件が該当", body):
+        if re.search(r"0件が該当", body) or "ございませんでした" in body:
             print("[info] 該当0件")
             browser.close()
             return []
 
-        rooms = parse_results(popup)
+        # 該当が1件のときは一覧を飛ばして詳細ページに遷移する
+        if is_detail_page(popup):
+            print("[info] 詳細ページに直行（該当1件）")
+            rooms = parse_detail(popup)
+        else:
+            m = re.search(r"(\d+)件が該当", body)
+            if m:
+                print(f"[info] JKKの表示件数: {m.group(1)}件")
+            rooms = parse_all_pages(popup)
+
         browser.close()
         return rooms
 
