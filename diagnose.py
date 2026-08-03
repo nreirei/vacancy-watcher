@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
 """
-JKKねっと ダンプ v6 : 検索を実行して結果一覧の構造を調べる
+JKKねっと 地域コード対応表の抽出 (v7)
 
-v5で判明した仕組み:
-  1. 中継ページで submitNext() を呼ぶとポップアップ(名前 JKKnet)が開く
-  2. ポップアップに条件入力画面が出る (form name=akiSearch)
-  3. 地域は checkbox name="akiyaInitRM.akiyaRefM.checks" value=<区コード>
-     区コードは東京都の行政区画コードと一致（板橋区=19 など）
-  4. 検索実行は submitPage('akiyaJyoukenRef') を呼ぶ
+目的:
+  区市町村のチェックボックスと、その画面上のラベル文字列を
+  「実物から」ペアで取り出す。
+  これまでの対応表はDOM順から推測して作ったため、
+  一部の区（練馬区など）でずれている疑いがある。
 
-このスクリプトでは、プライバシーのため特定の区ではなく
-「区部すべて」(allCheck=ALLKU) で検索し、結果一覧の構造だけを調べる。
+出力:
+  そのまま jkk_watch.py の AREA_CODES に貼れる形の Python 辞書。
 """
 
 import os
@@ -18,7 +17,7 @@ import time
 
 from playwright.sync_api import sync_playwright
 
-PC = "https://jhomes.to-kousya.or.jp/search/jkknet/service/akiyaJyoukenStartInit"
+START = "https://jhomes.to-kousya.or.jp/search/jkknet/service/akiyaJyoukenStartInit"
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/126.0 Safari/537.36")
 
@@ -30,13 +29,13 @@ def log(s=""):
     out.append(str(s))
 
 
-def open_search_popup(ctx, page):
-    """中継ページからポップアップの条件入力画面を取得する"""
-    page.goto(PC, wait_until="domcontentloaded", timeout=60000)
+def open_form(page):
+    page.goto(START, wait_until="domcontentloaded", timeout=60000)
     time.sleep(3)
-    with page.expect_popup(timeout=30000) as pi:
+    with page.expect_popup(timeout=45000) as pi:
         page.evaluate("submitNext()")
     popup = pi.value
+    popup.on("dialog", lambda d: d.accept())
     for _ in range(20):
         time.sleep(2)
         if "wait.jsp" not in popup.url:
@@ -57,83 +56,104 @@ def main():
         page = ctx.new_page()
         page.on("dialog", lambda d: d.accept())
 
-        popup = open_search_popup(ctx, page)
-        popup.on("dialog", lambda d: d.accept())
-        log(f"条件入力画面: {popup.url}")
-        log(f"title: {popup.title()}")
+        popup = open_form(page)
+        log(f"条件入力画面: {popup.url}\n")
 
-        # --- 区部すべてにチェック ---
-        log("\n区部すべてにチェックを入れる")
+        # チェックボックスごとに、周辺のテキストをJSで直接拾う
+        pairs = popup.evaluate("""
+        () => {
+          const boxes = document.querySelectorAll(
+            'input[name="akiyaInitRM.akiyaRefM.checks"]');
+          const res = [];
+          boxes.forEach((b, i) => {
+            let label = null;
+
+            // 1. for属性で結びついた label
+            if (b.id) {
+              const l = document.querySelector('label[for="' + b.id + '"]');
+              if (l) label = l.innerText;
+            }
+            // 2. 親が label
+            if (!label && b.closest('label')) {
+              label = b.closest('label').innerText;
+            }
+            // 3. 同じ td 内のテキスト
+            if (!label) {
+              const td = b.closest('td');
+              if (td) label = td.innerText;
+            }
+            // 4. 次の兄弟ノード
+            if (!label || !label.trim()) {
+              let n = b.nextSibling, buf = '';
+              while (n && buf.trim().length < 12) {
+                buf += (n.textContent || '');
+                n = n.nextSibling;
+              }
+              label = buf;
+            }
+
+            res.push({
+              index: i,
+              value: b.value,
+              id: b.id || '',
+              label: (label || '').replace(/\\s+/g, '').slice(0, 20),
+              html: b.outerHTML.slice(0, 160)
+            });
+          });
+          return res;
+        }
+        """)
+
+        log(f"チェックボックス総数: {len(pairs)}\n")
+        log("=" * 55)
+        log("index | value  | label")
+        log("=" * 55)
+        for r in pairs:
+            log(f"{r['index']:5d} | {r['value']:6s} | {r['label']}")
+
+        log("\n" + "=" * 55)
+        log("そのまま貼れる辞書形式")
+        log("=" * 55)
+        log("AREA_CODES = {")
+        for r in pairs:
+            lab = r["label"]
+            if lab:
+                log(f'    "{lab}": "{r["value"]}",')
+            else:
+                log(f'    # ラベル取得失敗: value={r["value"]} index={r["index"]}')
+        log("}")
+
+        # ラベルが取れなかった場合に備えて生HTMLも出す
+        empty = [r for r in pairs if not r["label"]]
+        if empty:
+            log(f"\n!! ラベルを取得できなかった要素が {len(empty)} 件あります")
+            for r in empty[:10]:
+                log(f"  index={r['index']} value={r['value']}")
+                log(f"    {r['html']}")
+
+        # 検証: 練馬区が本当にどの値か、行単位のテキストでも確認する
+        log("\n" + "=" * 55)
+        log("検証: 地域欄のテーブル行のテキスト")
+        log("=" * 55)
         try:
-            popup.locator("input[value=ALLKU]").first.check(timeout=10000)
-            time.sleep(1)
-            checked = popup.evaluate(
-                "document.querySelectorAll("
-                "'input[name=\"akiyaInitRM.akiyaRefM.checks\"]:checked').length"
-            )
-            log(f"チェックされた区の数: {checked}")
+            rows = popup.evaluate("""
+            () => {
+              const b = document.querySelector(
+                'input[name="akiyaInitRM.akiyaRefM.checks"]');
+              const table = b.closest('table');
+              return Array.from(table.querySelectorAll('tr')).map(
+                tr => Array.from(tr.querySelectorAll('td')).map(td => {
+                  const cb = td.querySelector('input[type=checkbox]');
+                  return (cb ? '[' + cb.value + ']' : '') +
+                         td.innerText.replace(/\\s+/g, '');
+                }).join(' | ')
+              );
+            }
+            """)
+            for i, r in enumerate(rows[:20]):
+                log(f"  tr[{i}]: {r[:200]}")
         except Exception as e:
-            log(f"チェック失敗: {e}")
-
-        # --- 検索実行 ---
-        log("\nsubmitPage('akiyaJyoukenRef') を実行")
-        try:
-            popup.evaluate("submitPage('akiyaJyoukenRef')")
-        except Exception as e:
-            log(f"submitPage失敗: {e}")
-        try:
-            popup.wait_for_load_state("networkidle", timeout=60000)
-        except Exception:
-            pass
-        time.sleep(4)
-
-        log(f"\n検索後URL: {popup.url}")
-        log(f"title: {popup.title()}")
-
-        # --- 結果ページの構造 ---
-        log("\n" + "=" * 45)
-        log("### 結果一覧ページの構造")
-        log("=" * 45)
-
-        try:
-            tables = popup.locator("table")
-            log(f"tables: {tables.count()}")
-        except Exception:
-            pass
-
-        try:
-            rows = popup.locator("tr")
-            n = rows.count()
-            log(f"tr の総数: {n}")
-            log("\n--- 各行のテキスト（最大40行）---")
-            for i in range(min(n, 40)):
-                try:
-                    t = rows.nth(i).inner_text(timeout=2000)
-                    t = " | ".join(x.strip() for x in t.split("\n") if x.strip())
-                    log(f"  tr[{i}]: {t[:220]}")
-                except Exception:
-                    pass
-        except Exception as e:
-            log(f"行取得失敗: {e}")
-
-        # --- リンク（詳細ページへの遷移方法）---
-        try:
-            links = popup.locator("a")
-            n = links.count()
-            log(f"\nlinks: {n}")
-            for i in range(min(n, 30)):
-                el = links.nth(i)
-                log(f"  a[{i}] text={(el.inner_text() or '').strip()[:25]} "
-                    f"href={(el.get_attribute('href') or '')[:60]} "
-                    f"onclick={(el.get_attribute('onclick') or '')[:80]}")
-        except Exception:
-            pass
-
-        # --- 本文 ---
-        try:
-            log(f"\n--- body text ---\n{popup.locator('body').inner_text()[:4000]}")
-        except Exception:
-            pass
+            log(f"検証失敗: {e}")
 
         browser.close()
 
@@ -152,4 +172,4 @@ if __name__ == "__main__":
         if len(text) > 60000:
             text = text[:60000] + "\n...(切り詰め)"
         with open(path, "a", encoding="utf-8") as f:
-            f.write("# JKKねっと ダンプ v6（結果一覧）\n\n```\n" + text + "\n```\n")
+            f.write("# 地域コード対応表\n\n```\n" + text + "\n```\n")
